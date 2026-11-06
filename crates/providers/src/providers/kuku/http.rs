@@ -95,6 +95,7 @@ fn translate_status(status: u16, url: &str, head: &str) -> GatewayError {
 ///
 /// 表单值由调用方给定：签到任务的 `task_type` 是 `LOGIN` / `CHAT` 这类常量，
 /// 不含需要百分号编码的字符，按 `k=v` 直接拼接（与上游客户端一致）。
+#[allow(dead_code)] // 旧 freepoint 表单接口的入口；签到迁移到 kukuai30 后暂无调用方，保留备用
 pub async fn post_form_value(
     url: &str,
     headers: &[(String, String)],

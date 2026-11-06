@@ -38,9 +38,12 @@
 //!
 //! ── 余额 / 签到 ────────────────────────────────────────────
 //! 余额：`GET /bizapi/gfpro/getgfvipremain` → `data.list[0].totalPoint`。
-//! 签到：优先「库库 30 天签到」（`act/v2/kukuai30/*`，2026-10-21 起），
-//! 旧「免费领积分」任务（`freepoint/homenew` + `freepoint/taskComplete`）
-//! 作兜底，见 `checkin.rs`。
+//! 签到：真实签到本体是 **kukuai30** 体系（客户端左下角签到面板同款，无
+//! jsToken 要求）：`POST /act/v2/kukuai30/homepage|signin?uid=<uk>&tid=…`
+//! —— 网关可完整执行（claim 见 `checkin.rs`；成败以 homepage 复读为准，
+//! 动作被风控拒绝时把 errno/errmsg 如实透出）。活动任务（activity_kuku 的
+//! 对话 / 浏览）的积分需客户端完成（服务端校验真实行为，网关代报实测 -8），
+//! claim 时尽力上报并如实汇总。接口细节见 `tasks.rs`。
 //! 业务会话前提（换发 genflowpro STOKEN）见 `engine.rs`。
 //!
 //! ── 刷新 / 登录形态 ────────────────────────────────────────
@@ -65,6 +68,7 @@ mod http;
 mod login;
 mod models;
 mod session;
+mod tasks;
 
 use serde_json::Value;
 
@@ -97,6 +101,15 @@ pub const USER_AGENT: &str = concat!(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ",
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 );
+
+/// act（kukuai30 签到/面板）专用 User-Agent：逐字取自本机客户端 1.7.3.107
+/// 自己发出的请求（IndexedDB 埋点记录原文，KuKuGenFlow/1.6.32 是客户端壳
+/// 版本、Electron/41.10.1 是运行时 —— 与 Chrome/146.0.7680.216 一样都是
+/// 客户端真实值）。act 家族有独立风控（errno 8001「账号异常，无法参与
+/// 活动」，2026-11-03 实测：客户端全绿而网关被拦），UA 是网关请求与客户
+/// 端之间最显眼的静态指纹差（原先发的是裸 Chrome UA）。chat/models 等
+/// 其余端点维持 `USER_AGENT` 不动 —— 那些路径裸 UA 实测可用，不陪赌。
+pub const ACT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KuKuGenFlow/1.6.32 Chrome/146.0.7680.216 Electron/41.10.1 Safari/537.36";
 
 /// 默认模型（上游自动选路；未知模型名显式回退它，避免上游静默降级）
 pub const DEFAULT_MODEL: &str = "auto";
@@ -135,7 +148,7 @@ impl Provider for KukuProvider {
                 model_refresh: true,
                 // `/bizapi/gfpro/getgfvipremain`
                 usage: true,
-                // 30 天签到 + freepoint 每日任务（`checkin`）
+                // kukuai30 真实签到 + activity_kuku 活动任务（`checkin`）
                 checkin: true,
                 claims: false,
                 // 主站登录页（壳侧从 WebView Cookie 存储取回登录态）
@@ -186,7 +199,7 @@ impl Provider for KukuProvider {
                 ..Default::default()
             })
         .with_checkin(proto::CheckinInfo {
-            description: Some("每日签到（30 天活动）与免费领积分任务".to_string()),
+            description: Some("每日签到（客户端同款签到面板）与活动任务汇总".to_string()),
             modes: vec![proto::CheckinMode::Checkin],
             ..Default::default()
         })
@@ -284,7 +297,7 @@ impl Provider for KukuProvider {
         })
     }
 
-    /// 每日签到：优先 30 天签到活动，旧 freepoint 任务作兜底。
+    /// 每日签到：kukuai30 真实签到 + activity_kuku 活动任务汇总。
     fn checkin<'a>(
         &'a self,
         ctx: &'a PluginCtx,

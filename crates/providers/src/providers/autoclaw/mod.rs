@@ -26,7 +26,9 @@
 //! ── 凭证来源四条，优先级由 [`credentials::snapshot_for`] 决定 ─────
 //! ```text
 //!   账号记录（手动添加 / 网页登录）  → 记录里的 token（`enc:` 自动解密）
-//!   桌面端实时登录态                → %APPDATA%/AutoClaw/auth.json（DPAPI 解密）
+//!   桌面端实时登录态                → %APPDATA%/AutoClaw/auth.json（老版，DPAPI 解密）
+//!                                      %APPDATA%/AutoClaw-official/accounts/…（新版，
+//!                                      account-credentials.enc，见 official.rs）
 //!   网关配置                        → ~/.openclaw-autoclaw/openclaw.json（明文）
 //!   环境变量                        → AUTOCLAW_TOKEN（国际版 AUTOCLAW_INTL_TOKEN）
 //! ```
@@ -63,6 +65,7 @@ pub mod credentials;
 pub mod login;
 pub mod models;
 pub mod oauth;
+pub mod official;
 pub mod profile;
 pub mod promotion;
 pub mod prompt;

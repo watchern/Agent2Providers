@@ -1,0 +1,116 @@
+name: build-win
+
+# 推 `v*` tag 时在本仓库直接打包 **Windows 版**（x86_64-pc-windows-msvc），
+# 产物 zip 挂到本仓库同名的 GitHub Release 上。
+#
+# ── 与 build.yml 的关系（互不干扰）──────────────────────────
+# 现有 build.yml 是「派发」工作流：把 tag 转发给独立构建仓库
+# （Agent2Builder/agent2api-providers-releases）做五平台矩阵，本仓库不编译。
+# 本工作流是**另一条独立链路**：只编 Windows 一个平台，挂在 windows-latest
+# 上单 job 跑完，负载可控。两条链路各发各的 Release（派发链路的产物落在
+# 构建仓库，本链路落在本仓库），同名 tag 同时触发也不会互相覆盖 —— 网关
+# 更新检查按 `<id>-<version>-<target>.zip` 精确匹配，两边产物同名同内容口径。
+#
+# ── 版本一致性闸门 ────────────────────────────────────────
+# zip 文件名里的 version 取自 pack.json；tag 与 pack.json 不一致时直接失败，
+# 不产出对不上号的包（tag v3.4.2.1 必须对应 pack.json 的 3.4.2.1）。
+#
+# ── 签名可选 ──────────────────────────────────────────────
+# 配了 secret `AGENT2API_PLUGIN_KEY` 就出签名包，没配就保持未签名（复用
+# .github/actions/sign-pack 的「没配不失败」语义，见该 action 的说明）。
+#
+# ── 重跑 ──────────────────────────────────────────────────
+# 构建失败或需要重打同一个 tag 时，在 Actions 页面对该次运行点 re-run 即可，
+# 不需要删 tag 重推。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  # 创建 Release 与上传附件都要 contents write
+  contents: write
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 校验 tag 与 pack.json 版本一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PACK_VERSION=$(node -e "process.stdout.write(require('./pack.json').version)")
+          if [ "$TAG_VERSION" != "$PACK_VERSION" ]; then
+            echo "::error::tag（$GITHUB_REF_NAME → $TAG_VERSION）与 pack.json 版本（$PACK_VERSION）不一致，拒绝打包"
+            exit 1
+          fi
+          echo "版本校验通过：$TAG_VERSION"
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 cargo 构建产物
+        uses: Swatinem/rust-cache@v2
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 构建并打包（cargo build --release + zip）
+        shell: bash
+        run: node scripts/pack.mjs
+
+      - name: 协议自检（28 项网关模拟）
+        shell: bash
+        run: node scripts/verify.mjs
+
+      - name: 签名插件包（未配 secret 则跳过）
+        uses: ./.github/actions/sign-pack
+        with:
+          key: ${{ secrets.AGENT2API_PLUGIN_KEY }}
+
+      - name: 上传到 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          # 发布正文 = tag 提交的完整提交说明。本仓库的惯例是发版提交里
+          # 带编号的改动清单，checkout 检出的正是 tag 提交，git log -1 即得
+          # —— 与 Agent2API 主仓的发布流水线同一做法。不用 --generate-notes：
+          # 那只给一行 commit log，不带改动细节。
+          git log -1 --format=%B > release-notes.md
+          # 语义化预发布（版本号带「-」，如 v3.3.0-beta.1）→ 标 pre-release：
+          # GitHub 的 /releases/latest 排除预发布 —— 漏标会把 beta 当正式版
+          # 推给所有用户，误标则正式版收不到更新。
+          case "${TAG#v}" in
+            *-*) PRERELEASE=true ;;
+            *)   PRERELEASE=false ;;
+          esac
+          shopt -s nullglob
+          zips=(dist/*.zip)
+          [ ${#zips[@]} -gt 0 ] || { echo "::error::dist/ 里没有 zip" >&2; exit 1; }
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # 重跑场景（手动 re-run）：附件覆盖上传、pre-release 标记顺手
+            # 自愈；**正文不覆盖** —— re-run 不该抹掉发布后人工修订过的说明
+            gh release upload "$TAG" "${zips[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --prerelease="$PRERELEASE" --repo "$GITHUB_REPOSITORY"
+            echo "Release 已存在：附件覆盖上传，pre-release=$PRERELEASE（正文保留）"
+          else
+            gh release create "$TAG" "${zips[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --prerelease="$PRERELEASE" \
+              --notes-file release-notes.md
+            echo "已创建 Release（pre-release=$PRERELEASE），正文 = tag 提交的改动清单"
+          fi

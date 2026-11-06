@@ -41,7 +41,19 @@ homepage = "https://github.com/aimod-cc/Agent2API"
 # `catch_unwind` 能在单个请求边界上兜住（见 crates/providers/src/lib.rs
 # 的 `guard` 辅助）。
 panic = "unwind"
-lto = true
-codegen-units = 1
+# ── 编译速度与产物体积的取舍（3.4.2.1 起从 fat LTO 放宽）──────────
+# 曾用 `lto = true` + `codegen-units = 1`（全程序优化、单线程代码生成），
+# 换取最小体积；代价是 4 核开发机上全量 40 分钟、改一行也要 28 分钟
+# （providers 是一个大 crate，任何改动都触发整 crate 重新优化 + 链接）。
+# 本插件以 HTTP 转发为主，运行性能对优化档不敏感，而 `opt-level = "s"`
+# 与 `strip` 仍然保留（体积的大头来自它们，不是 LTO），因此：
+#   - `lto = "thin"`： ThinLTO 并行执行，二进制只比 fat LTO 大几个百分点；
+#   - `codegen-units = 16`：默认并行度，让 4 核真正用起来；
+#   - `incremental = true`：release 默认关闭增量，fat LTO 下开了也会被
+#     忽略；thin LTO 下增量生效，改一行的增量构建从近半小时降到几分钟。
+# 代价是 target 目录更大（增量缓存），磁盘紧张时删 target 重来即可。
+lto = "thin"
+codegen-units = 16
+incremental = true
 opt-level = "s"
 strip = true
