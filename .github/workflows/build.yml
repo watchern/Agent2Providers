@@ -23,9 +23,9 @@ name: release
 # 触发本仓库的任何编译。
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # fork 只需要 Windows 包(由 build-win 在 tag 推送时自动构建);本五平台
+  # 派发链路依赖上游构建仓库的 BUILDER_DISPATCH_TOKEN secret,fork 没有该
+  # secret 必然失败,故关闭 tag 触发,仅保留手动派发入口。
   workflow_dispatch:
     inputs:
       version:
