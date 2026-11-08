@@ -109,6 +109,12 @@ pub const USER_AGENT: &str = concat!(
 /// 活动」，2026-11-03 实测：客户端全绿而网关被拦），UA 是网关请求与客户
 /// 端之间最显眼的静态指纹差（原先发的是裸 Chrome UA）。chat/models 等
 /// 其余端点维持 `USER_AGENT` 不动 —— 那些路径裸 UA 实测可用，不陪赌。
+///
+/// ── 后续实测（2026-11-08，本 UA 已随 3.4.3-beta-1 部署）────────
+/// 签到动作仍被 8001 拒 —— UA 对齐只消掉了最显眼的静态指纹差，act 风控
+/// 还认更深一层（设备指纹 / 行为链路），或对账号已有粘性标记。结论与
+/// 取舍：不再加码伪造指纹去赌风控，客户端签到面板能签时让客户端完成
+/// 当日动作，网关读 homepage 如实报「今日已签到」（`do_signin` 先读后签）。
 pub const ACT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) KuKuGenFlow/1.6.32 Chrome/146.0.7680.216 Electron/41.10.1 Safari/537.36";
 
 /// 默认模型（上游自动选路；未知模型名显式回退它，避免上游静默降级）

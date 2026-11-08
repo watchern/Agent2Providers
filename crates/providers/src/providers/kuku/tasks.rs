@@ -208,6 +208,11 @@ pub async fn signin_state(
 /// 证实它不是「已签」，旧注释把它当已签是错的），用户需要看到这个真实
 /// 原因而不是一句误导性的「今日已签到」。
 ///
+/// 2026-11-08 复测（3.4.3-beta-1，act UA 已对齐客户端）：动作依旧被 8001
+/// 拒 —— UA 只是静态指纹之一，风控还认更深一层（设备指纹 / 行为链路），
+/// 或对账号已有粘性标记。取舍：不再加码伪造指纹去赌风控；客户端面板能签
+/// 时让客户端完成当日动作，网关靠先读 homepage 把已签状态如实带出。
+///
 /// 返回 `{success, alreadySigned, signedToday, continuousDays,
 /// nextRewardDays, nextRewardAward, message}`。
 pub async fn do_signin(
@@ -247,11 +252,21 @@ pub async fn do_signin(
         // 未签上：把服务端的拒绝原因如实带出（8001 = 账号异常，无法参与
         // 活动 —— 活动侧风控；客户端遇到同一 errno 也会弹同样的文案）。
         // 旧实现此时回「今日已签到」，把失败伪装成了另一种成功。
-        result["message"] = json!(match (action_errno, action_msg) {
+        let mut message = match (action_errno, action_msg) {
             (Some(code), "") => format!("服务端拒绝签到（errno {code}）"),
             (Some(code), msg) => format!("服务端拒绝签到（errno {code}：{msg}）"),
             (None, _) => "签到动作未生效（服务端未报错，但面板仍显示未签）".to_string(),
-        });
+        };
+        if action_errno == Some(8001) {
+            // 8001 两次实测（11-03 / 11-08，后者 act UA 已对齐客户端）都是
+            // 同一句口径，重试不会变。把已知可行路径一并告诉用户：客户端
+            // 面板若能签，签完这里先读 homepage，会如实报「今日已签到」。
+            message.push_str(
+                "；这是库库AI活动侧风控在拒绝网关代签（11-03 / 11-08 两次实测一致）\
+                 ——官方客户端签到面板若能签，签完之后这里再跑会如实报「今日已签到」",
+            );
+        }
+        result["message"] = json!(message);
     }
     Ok(result)
 }
