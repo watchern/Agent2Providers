@@ -120,9 +120,6 @@ pub(super) async fn query_usage(
             ),
         ));
     }
-    // 与适配器的 `resolve_credentials` 同一条链（账号记录 → 桌面端实时登录态 →
-    // 环境变量），但这里只取快照、**不触发刷新**：余额查询是只读展示动作，
-    // 过期就让上游回 401，由调用方走「刷新后重试一次」那条既有链路。
     let credentials = credentials::snapshot_for(record.as_ref(), region)?;
     if credentials.token.trim().is_empty() {
         return Err(GatewayError::with_status(
@@ -130,8 +127,51 @@ pub(super) async fn query_usage(
             "该账号没有可用凭证，无法查询积分",
         ));
     }
-    let points = query_points(&credentials).await?;
-    let (subscription, subscription_error) = match query_subscription(&credentials).await {
+    match do_query(ctx, record.as_ref(), &credentials).await {
+        Ok(document) => Ok(document),
+        // 401（上游业务码 410000 / 400000 或 HTTP 401）：先强制刷新一次再重试。
+        //
+        // ── 为什么在这里做，而不是交给 Host ────────────────────────
+        // 内置家（小浣熊 / Cline / WorkBuddy …）的 401 由 Host 的
+        // `query_usage_inner` 统一走「刷新后重试一次」；但 AutoClaw 已迁到插件，
+        // 插件错误跨进程回传时**状态码被归一**（协议层 `WireError` 只带机器码与
+        // 文案、不带 HTTP 状态码），Host 收到的 401 变成 502，于是那一侧的刷新
+        // 重试对插件家恒不触发。与已迁插件的 raccoon / accio / trae / zcode /
+        // qoder / workbuddy 一致，这里在自己这一侧补上「401 → 强制刷新 → 重试」。
+        //
+        // ── 桌面端来源只写内存缓存、不落盘（与刷新模块头一致）────────
+        // 刷新结果进 `credentials` 的内存覆盖缓存（键随磁盘 mtime，文件一变即
+        // 失效），绝不回写 auth.json，不写坏用户的桌面端登录态。
+        Err(error) if error.status_code == 401 && credentials.can_refresh() => {
+            let refreshed = match super::refresh::refresh(&credentials, true).await {
+                Ok(next) => next,
+                Err(refresh_error) => {
+                    return Err(GatewayError::with_status(
+                        401,
+                        format!(
+                            "{}；自动续期也失败：{}（登录态可能已被上游作废，请重新登录或重新导入该账号的凭证）",
+                            error.message, refresh_error.message
+                        ),
+                    ));
+                }
+            };
+            do_query(ctx, record.as_ref(), &refreshed).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// 用给定凭证查一次积分 + 订阅（被 [`query_usage`] 在「首查 / 刷新后重试」两处复用）。
+///
+/// 直接用传入的 `credentials` 而不再解析快照，因此「刷新后重试」能真正用上新
+/// token，而不是又去读一遍旧的快照（桌面端来源的快照还可能是刷新前的旧值）。
+async fn do_query(
+    ctx: &PluginCtx,
+    record: Option<&Value>,
+    credentials: &AutoClawCredentials,
+) -> Result<Value, GatewayError> {
+    let points = query_points(credentials).await?;
+    let (subscription, subscription_error) = match query_subscription(credentials).await {
         Ok(value) => (value, Value::Null),
         Err(error) => (Value::Null, Value::String(error.message)),
     };
@@ -161,14 +201,14 @@ pub(super) async fn query_usage(
     // 在这里补一次：余额查询本来就要求凭证可用，而界面上那行副标题只有
     // 带着凭证向上游查才拿得到（见 `autoclaw::profile`）。放在结果算完之后：
     // 它失败或超时都不影响本次余额结果，写库也只在「还没有邮箱」时发生一次。
-    if let Some(record) = record.as_ref() {
+    if let Some(record) = record {
         let missing = record
             .get("email")
             .and_then(Value::as_str)
             .map(str::trim)
             .is_none_or(str::is_empty);
         if missing {
-            let email = super::profile::email_or_empty(&credentials, "余额查询").await;
+            let email = super::profile::email_or_empty(credentials, "余额查询").await;
             if !email.is_empty() {
                 if let Some(id) = record.get("id").and_then(Value::as_str) {
                     save_email(ctx, id, &email).await;
