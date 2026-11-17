@@ -227,18 +227,17 @@ impl Provider for AutoClawProvider {
         req: proto::ChatRequest,
     ) -> SendFuture<'a, ChatPlan> {
         Box::pin(async move {
-            let record = crate::store::record(ctx, self.region.provider_id(), &req.account)
-                .await?;
-            // ── 取出来先剥 `Bearer ` 前缀（issue #386）────────────────
-            // 存储里的 token 可能自带前缀（登录响应原样落库的值就是这样），
-            // 而下面拼头时会再加一个 —— 不剥就是 `Bearer Bearer eyJ…`，上游按
-            // 空格切分后拿到的凭证不是合法 JWT，恒定 401 `Invalid token`。
-            // 判据与 `refresh::signed_auth_headers` 出口那一处同一套（那边覆盖
-            // 刷新 / 余额 / 签到 / 目录），两条链路都收口才不会有漏网路径。
-            let token = crate::crypto::strip_bearer(&crate::store::pick(
-                &record,
-                &["token", "accessToken", "access_token"],
-            ));
+            // ── 凭证必须走统一快照，与签到 / 余额同一口径 ─────────────
+            // 桌面账号（`desktop: true`）的 token 按设计只存在于桌面登录态
+            // 文件与进程内存刷新缓存里，**不写 pluginSecret**（见
+            // `persist_refresh` 的桌面早退）。原来这里直接 `store::record`
+            // + `pick("accessToken")` 是唯一的漏网路径，对桌面账号必然取空、
+            // 报「缺少 accessToken，无法转发」，但同一账号签到 / 余额都正常。
+            // `ensure_token` 里已含 `resolve_credentials`（桌面分支走
+            // `local_credentials`）与临期主动刷新；401 后的强制刷新仍由
+            // 编排层调 `refresh_token`，两条链路都在同一套凭证上收口。
+            let account = req.account.clone();
+            let token = crate::crypto::strip_bearer(&self.ensure_token(ctx, &account).await?);
             if token.is_empty() {
                 return Err("AutoClaw 账号缺少 accessToken，无法转发".to_string());
             }
