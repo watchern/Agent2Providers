@@ -117,6 +117,31 @@ fn entitlement_json(item: &super::plans::PlanEntitlement) -> Value {
     })
 }
 
+/// 已到账套餐也要进预览清单。
+///
+/// 官方客户端领的套餐不会重新出现在账号预览 / 营销下发里；匿名目录又常被
+/// 上游以 401 拒绝。余额通道（`ownership::query`）是这时唯一能证明「刚领到」
+/// 的来源，必须能独立产出候选，否则弹窗和签到中心都看不见这份套餐。
+fn owned_plan_candidate(owned: &OwnedPlan) -> Option<ClaimablePlan> {
+    if !matches!(owned.state.as_str(), "active" | "pending") { return None; }
+    let now = crate::http::now_ms() / 1000;
+    if owned.ends_at.is_some_and(|end| end <= now) { return None; }
+    Some(ClaimablePlan {
+        plan_id: owned.plan_id.clone(),
+        name: if owned.name.trim().is_empty() {
+            owned.plan_id.clone()
+        } else {
+            owned.name.clone()
+        },
+        description: String::new(),
+        priority: 0,
+        starts_at: owned.starts_at,
+        ends_at: owned.ends_at,
+        entitlements: owned.entitlements.clone(),
+        marketing_campaign_ids: Vec::new(),
+    })
+}
+
 pub async fn preview(
     ctx: &PluginCtx,
     region: Region,
@@ -215,14 +240,20 @@ pub async fn preview(
                 }
             })
         });
-        let needs_ownership = snapshot.plans.iter().any(|plan| {
-            !snapshot.owned.get(&plan.plan_id).is_some_and(|owned| owned.matches_activity(plan))
-        });
-        if needs_ownership && !jwt.trim().is_empty() {
+        // 余额通道是「已到账」的权威证据。即使 plans 为空也必须查一次：
+        // 官方客户端刚领到的套餐不会回到账号预览 / 营销下发，匿名目录又常被
+        // 上游 401 拒绝；旧逻辑只在已有计划需要确认时才查，正好漏掉这种场景。
+        if !jwt.trim().is_empty() {
             match ownership::query(region, account, jwt, device_mid, proxy).await {
-                Ok(plans) => {
+                Ok(owned_plans) => {
+                    succeeded = true;
+                    for owned in &owned_plans {
+                        if let Some(candidate) = owned_plan_candidate(owned) {
+                            merge(&mut snapshot.plans, vec![candidate]);
+                        }
+                    }
                     for plan in &snapshot.plans {
-                        if let Some(owned) = plans.iter().filter(|owned| owned.matches_activity(plan))
+                        if let Some(owned) = owned_plans.iter().filter(|owned| owned.matches_activity(plan))
                             .max_by_key(|owned| owned.starts_at)
                         {
                             snapshot.owned.insert(plan.plan_id.clone(), owned.clone());
@@ -233,11 +264,12 @@ pub async fn preview(
             }
         }
     }
+    // 匿名目录只是补充发现源：上游 401/429 不该把「今日已签」整条判死。
+    // 账号预览、营销下发与余额通道才是权威口径。
     match state::remember_preview(
         ctx, region, account, jwt, device_mid, user_id, &snapshot.plans, &snapshot.owned,
         &checkin_plan_ids, snapshot.preview_error.is_none() && snapshot.marketing_error.is_none()
-            && snapshot.catalog_error.is_none() && snapshot.ownership_error.is_none()
-            && snapshot.ledger_error.is_none(),
+            && snapshot.ownership_error.is_none() && snapshot.ledger_error.is_none(),
     ).await {
         Ok(daily_checkin) => snapshot.daily_checkin = daily_checkin,
         Err(error) => snapshot.ledger_error = Some(error.message),
